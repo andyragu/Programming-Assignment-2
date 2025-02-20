@@ -7,6 +7,7 @@
 
 #define QUEUE_NAME "/server_queue"
 #define MAX_MSG_SIZE 1024
+#define NUM_THREADS 4
 
 void* handle_client(void* arg) {
     char command[MAX_MSG_SIZE];
@@ -30,6 +31,20 @@ int main() {
     attr.mq_maxmsg = 10;
     attr.mq_msgsize = MAX_MSG_SIZE;
 
+    // Working on step 2
+
+    //Getting the process ID
+    pid_t pid = getppid();
+
+    printf("I am the Server's Main Thread. My Parent Process is (PID: %d)...", ppid)
+
+    //Creating threads
+    for (i = 0; i < NUM_THREADS; ++i) {
+
+    }
+
+    // Here ends step 2 work
+
     // Create message queue
     mq = mq_open(QUEUE_NAME, O_CREAT | O_RDONLY, 0666, &attr);
     if (mq == (mqd_t)-1) {
@@ -37,7 +52,7 @@ int main() {
         exit(1);
     }
 
-    printf("Server started. Waiting for messages...\n");
+    printf("Broadcast message queue & Server message queue created. Waiting for client messages...\n");
 
     while (1) {
         char buffer[MAX_MSG_SIZE];
