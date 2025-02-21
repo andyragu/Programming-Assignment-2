@@ -19,8 +19,6 @@ Client clients[MAX_CLIENTS];
 int client_count = 0;
 pthread_mutex_t lock;
 
-__thread int thread_id;
-
 // **Function to Print Server Header**
 void print_header() {
     printf("\n============================================\n");
