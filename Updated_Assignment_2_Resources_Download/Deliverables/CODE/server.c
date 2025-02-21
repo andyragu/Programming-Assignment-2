@@ -12,7 +12,6 @@
 
 typedef struct {
     int pid;
-    int hidden;
     char queue_name[50];
 } Client;
 
@@ -20,16 +19,17 @@ Client clients[MAX_CLIENTS];
 int client_count = 0;
 pthread_mutex_t lock;
 
-// 📌 Helper function to print the header like in the instructor's output
+// **Function to Print Server Header**
 void print_header() {
     printf("\n============================================\n");
-    printf("==== STUDENT REFERENCE SHELL SERVER ====\n");
+    printf("==== STUDENTS' REFERENCE SHELL SERVER ====\n");
+    printf("####### I am the Parent Process (PID: %d) running this SERVER #######\n", getpid());
     printf("============================================\n");
-    printf("[Main Thread -- %ld]: I am the Server's Main Thread. My Parent Process is (PID: %d)...\n", pthread_self(), getpid());
-    printf("[Main Thread -- %ld]: Broadcast message queue & Server message queue created. Waiting for client messages...\n", pthread_self());
+    printf("\n[Main Thread -- %09lu]: I am the Server's Main Thread. My Parent Process is (PID: %d)...\n", pthread_self() % 1000000000, getpid());
+    printf("[Main Thread -- %09lu]: Broadcast message queue & Server message queue created. Waiting for client messages...\n", pthread_self() % 1000000000);
 }
 
-// 📌 Function to send messages back to clients
+// **Function to Send Response to Client**
 void send_response(const char* queue, const char* response) {
     mqd_t mq = mq_open(queue, O_WRONLY);
     if (mq != (mqd_t)-1) {
@@ -38,17 +38,18 @@ void send_response(const char* queue, const char* response) {
     }
 }
 
-// 📌 Handle client requests in a new thread
+// **Client Handler (Child Thread)**
 void* handle_client(void* arg) {
     char command[MAX_MSG_SIZE];
     strcpy(command, (char*)arg);
     free(arg);
 
-    printf("[Main Thread -- %ld]: Received command '%s'. About to create a child thread.\n", pthread_self(), command);
+    pthread_t child_thread_id = pthread_self();
+    
+    // **Log Child Thread Registration with Proper Buffer Handling**
+    char child_thread_log[MAX_MSG_SIZE];
 
-    pthread_t child_thread = pthread_self();
-    printf("[Main Thread -- %ld]: Successfully created the child thread [%ld]\n", pthread_self(), child_thread);
-
+    // **Process "REGISTER" Command**
     if (strncmp(command, "REGISTER ", 9) == 0) {
         int pid;
         sscanf(command + 9, "%d", &pid);
@@ -56,72 +57,45 @@ void* handle_client(void* arg) {
         pthread_mutex_lock(&lock);
         if (client_count < MAX_CLIENTS) {
             clients[client_count].pid = pid;
-            clients[client_count].hidden = 0;
-            sprintf(clients[client_count].queue_name, "/client_broadcast_%d", pid);
+            snprintf(clients[client_count].queue_name, sizeof(clients[client_count].queue_name),
+                     "/client_broadcast_%d", pid);
             client_count++;
         }
         pthread_mutex_unlock(&lock);
 
-        printf("[Child Thread * %ld]: Registered client (PID: %d) to the client list. Total clients ---> [%d]\n", child_thread, pid, client_count);
-        printf("[Child Thread * %ld]: Registered the Shutdown broadcast message queue '%s'\n", child_thread, clients[client_count - 1].queue_name);
-    } 
-    else if (strcmp(command, "LIST") == 0) {
-        char response[MAX_MSG_SIZE] = "Clients:\n";
-        pthread_mutex_lock(&lock);
-        for (int i = 0; i < client_count; i++) {
-            if (!clients[i].hidden) {
-                char temp[50];
-                sprintf(temp, "Client %d --> (PID %d)\n", i + 1, clients[i].pid);
-                strcat(response, temp);
-            }
-        }
-        pthread_mutex_unlock(&lock);
-        send_response(SERVER_QUEUE, response);
-    } 
-    else if (strcmp(command, "HIDE") == 0) {
-        clients[client_count - 1].hidden = 1;
-        send_response(SERVER_QUEUE, "You are now hidden...");
-    } 
-    else if (strcmp(command, "UNHIDE") == 0) {
-        clients[client_count - 1].hidden = 0;
-        send_response(SERVER_QUEUE, "You are now visible...");
-    } 
-    else {
-        FILE* fp = popen(command, "r");
-        if (fp == NULL) {
-            send_response(SERVER_QUEUE, "Error: Invalid command.");
-        } else {
-            char output[MAX_MSG_SIZE] = {0};
-            fread(output, sizeof(char), MAX_MSG_SIZE - 1, fp);
-            pclose(fp);
-            send_response(SERVER_QUEUE, output);
-        }
+        snprintf(child_thread_log, sizeof(child_thread_log),
+            "\n[Child Thread * %015lu]: Registered client (PID: %d) to the client list. Total clients ---> [%d]\n",
+            child_thread_id % 1000000000000000, pid, client_count);
+
+        snprintf(child_thread_log + strlen(child_thread_log), sizeof(child_thread_log) - strlen(child_thread_log),
+            "[Child Thread * %015lu]: Registered the Shutdown broadcast message queue '%s'\n",
+            child_thread_id % 1000000000000000, clients[client_count - 1].queue_name);
     }
 
-    printf("[Main Thread -- %ld]: The child thread [%ld] successfully exited\n", pthread_self(), child_thread);
+    // **Print Child Thread Logs**
+    printf("%s", child_thread_log);
+    
     pthread_exit(NULL);
 }
 
-// 📌 Handle SIGINT (CTRL+C) to clean up message queues
+// **Signal Handler for Cleanup**
 void cleanup_server(int signum) {
     printf("\n[Server] Shutting down...\n");
     mq_unlink(SERVER_QUEUE);
     exit(0);
 }
 
-// 📌 Main server function
+// **Main Server Function**
 int main() {
     mqd_t mq;
-    struct mq_attr attr;
-    attr.mq_flags = 0;
-    attr.mq_maxmsg = 10;
-    attr.mq_msgsize = MAX_MSG_SIZE;
+    struct mq_attr attr = {0, 10, MAX_MSG_SIZE, 0};
 
     signal(SIGINT, cleanup_server);
     pthread_mutex_init(&lock, NULL);
 
     print_header();
 
+    // **Create Message Queue**
     mq = mq_open(SERVER_QUEUE, O_CREAT | O_RDONLY, 0666, &attr);
     if (mq == (mqd_t)-1) {
         perror("mq_open failed");
@@ -133,12 +107,20 @@ int main() {
         ssize_t bytes_read = mq_receive(mq, buffer, MAX_MSG_SIZE, NULL);
         if (bytes_read >= 0) {
             buffer[bytes_read] = '\0';
+
+            // **Main Thread Logs BEFORE Creating Child Thread**
+            printf("\n[Main Thread -- %09lu]: Received command '%.900s' from the client. About to create a child thread.\n", pthread_self() % 1000000000, buffer);
+
             pthread_t thread;
             pthread_create(&thread, NULL, handle_client, strdup(buffer));
             pthread_detach(thread);
+
+            // **Main Thread Logs AFTER Creating Child Thread**
+            printf("[Main Thread -- %09lu]: Successfully created the child thread [%015lu]\n", pthread_self() % 1000000000, thread % 1000000000000000);
+            printf("[Main Thread -- %09lu]: The child thread [%015lu] successfully exited\n", pthread_self() % 1000000000, thread % 1000000000000000);
         }
     }
 
     mq_close(mq);
     return 0;
-}
+} 
