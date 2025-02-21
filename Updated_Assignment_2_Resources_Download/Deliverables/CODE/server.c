@@ -20,6 +20,8 @@ Client clients[MAX_CLIENTS];
 int client_count = 0;
 pthread_mutex_t lock;
 
+__thread int thread_id;
+
 // 📌 Helper function to print the header like in the instructor's output
 void print_header() {
     printf("\n============================================\n");
@@ -36,6 +38,16 @@ void send_response(const char* queue, const char* response) {
         mq_send(mq, response, strlen(response) + 1, 0);
         mq_close(mq);
     }
+}
+
+// 📌 Graceful termination (NOT DONE needs more work)
+void graceful_term(int signum) {
+    if (signum == SIGINT)
+        printf("Thread %d received signal %d (SIGINT). Preparing to exit gracefully...\n", thread_id, signum);
+    else if (signum == SIGTERM)
+        printf("Thread %d received signal %d (SIGTERM). Preparing to exit gracefully...\n", thread_id, signum);
+    
+    pthread_exit(NULL); // Exits thread gracefully
 }
 
 // 📌 Handle client requests in a new thread
@@ -85,6 +97,20 @@ void* handle_client(void* arg) {
     else if (strcmp(command, "UNHIDE") == 0) {
         clients[client_count - 1].hidden = 0;
         send_response(SERVER_QUEUE, "You are now visible...");
+    }
+    else if (strcmp(command, "exit") == 0) {
+        send_response(SERVER_QUEUE, "Ignored 'exit' command as it may Exit the Shell Session");
+    }
+    // NOT DONE NEEDS MORE WORK (Part of the graceful termination)
+    else if (strcmp(command, "EXIT") == 0) {
+        printf("\n------------------------------------------------------\n");
+        printf("<client-%d> [Main Thread ** %ld]: Gracefully exiting...\n", pthread_self());
+        printf("<client-%d> [Main Thread ** %ld]: Resource cleanup complete...\n", pthread_self());
+        printf("<client-%d> [Main Thread ** %ld]: Shutting down...\n", pthread_self());
+        printf("------------------------------------------------------\n");
+
+        send_response(SERVER_QUEUE, "Server is shutting down...");
+        cleanup_server(SIGINT);
     } 
     else {
         FILE* fp = popen(command, "r");
