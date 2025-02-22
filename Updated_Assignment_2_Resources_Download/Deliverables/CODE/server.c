@@ -25,8 +25,10 @@ void print_header() {
     printf("==== STUDENTS' REFERENCE SHELL SERVER ====\n");
     printf("####### I am the Parent Process (PID: %d) running this SERVER #######\n", getpid());
     printf("============================================\n");
-    printf("\n[Main Thread -- %09lu]: I am the Server's Main Thread. My Parent Process is (PID: %d)...\n", pthread_self() % 1000000000, getpid());
-    printf("[Main Thread -- %09lu]: Broadcast message queue & Server message queue created. Waiting for client messages...\n", pthread_self() % 1000000000);
+    printf("\n[Main Thread -- %09lu]: I am the Server's Main Thread. My Parent Process is (PID: %d)...\n",
+           pthread_self() % 1000000000, getpid());
+    printf("[Main Thread -- %09lu]: Broadcast message queue & Server message queue created. Waiting for the client messages...\n",
+           pthread_self() % 1000000000);
 }
 
 // **Function to Send Response to Client**
@@ -38,6 +40,43 @@ void send_response(const char* queue, const char* response) {
     }
 }
 
+// **Thread to Handle LIST Command**
+void* handle_list(void* arg) {
+    int client_pid = *((int*)arg);
+    free(arg);
+
+    char response[MAX_MSG_SIZE] = "Connected Clients:\n";
+    char client_queue[50];
+
+    snprintf(client_queue, sizeof(client_queue), "/client_broadcast_%d", client_pid);
+
+    pthread_mutex_lock(&lock);
+    for (int i = 0; i < client_count; i++) {
+        char client_info[50];
+        snprintf(client_info, sizeof(client_info), "Client %d ==> (PID %d)\n", i + 1, clients[i].pid);
+        strcat(response, client_info);
+    }
+    pthread_mutex_unlock(&lock);
+
+    printf("[Server] Sending LIST response to client queue: %s\n", client_queue);
+
+    mqd_t client_mq;
+    for (int i = 0; i < 5; i++) {  // Retry up to 5 times
+        client_mq = mq_open(client_queue, O_WRONLY);
+        if (client_mq != (mqd_t)-1) {
+            if (mq_send(client_mq, response, strlen(response) + 1, 0) != -1) {
+                mq_close(client_mq);
+                pthread_exit(NULL);
+            }
+            mq_close(client_mq);
+        }
+        usleep(100000);  // Sleep 100ms before retrying
+    }
+
+    perror("[Server] Failed to send LIST response after retries");
+    pthread_exit(NULL);
+}
+
 // **Client Handler (Child Thread)**
 void* handle_client(void* arg) {
     char command[MAX_MSG_SIZE];
@@ -45,36 +84,27 @@ void* handle_client(void* arg) {
     free(arg);
 
     pthread_t child_thread_id = pthread_self();
+    char queue_name[50];
+    int pid = -1;
     
-    // **Log Child Thread Registration with Proper Buffer Handling**
-    char child_thread_log[MAX_MSG_SIZE];
-
-    // **Process "REGISTER" Command**
     if (strncmp(command, "REGISTER ", 9) == 0) {
-        int pid;
         sscanf(command + 9, "%d", &pid);
+        snprintf(queue_name, sizeof(queue_name), "/client_broadcast_%d", pid);
 
         pthread_mutex_lock(&lock);
         if (client_count < MAX_CLIENTS) {
             clients[client_count].pid = pid;
-            snprintf(clients[client_count].queue_name, sizeof(clients[client_count].queue_name),
-                     "/client_broadcast_%d", pid);
+            strcpy(clients[client_count].queue_name, queue_name);
             client_count++;
         }
         pthread_mutex_unlock(&lock);
 
-        snprintf(child_thread_log, sizeof(child_thread_log),
-            "\n[Child Thread * %015lu]: Registered client (PID: %d) to the client list. Total clients ---> [%d]\n",
-            child_thread_id % 1000000000000000, pid, client_count);
-
-        snprintf(child_thread_log + strlen(child_thread_log), sizeof(child_thread_log) - strlen(child_thread_log),
-            "[Child Thread * %015lu]: Registered the Shutdown broadcast message queue '%s'\n",
-            child_thread_id % 1000000000000000, clients[client_count - 1].queue_name);
+        printf("\n[Child Thread * %015lu]: Registered client (PID: %d) to the client list. Total Clients ---> [%d]\n",
+               child_thread_id % 1000000000000000, pid, client_count);
+        printf("[Child Thread * %015lu]: Registered the Shutdown broadcast message queue '%s'\n",
+               child_thread_id % 1000000000000000, queue_name);
     }
 
-    // **Print Child Thread Logs**
-    printf("%s", child_thread_log);
-    
     pthread_exit(NULL);
 }
 
@@ -105,22 +135,73 @@ int main() {
     while (1) {
         char buffer[MAX_MSG_SIZE];
         ssize_t bytes_read = mq_receive(mq, buffer, MAX_MSG_SIZE, NULL);
-        if (bytes_read >= 0) {
-            buffer[bytes_read] = '\0';
+        if (bytes_read < 0) {
+            perror("mq_receive failed");
+            continue;
+        }
+        buffer[bytes_read] = '\0';
 
-            // **Main Thread Logs BEFORE Creating Child Thread**
-            printf("\n[Main Thread -- %09lu]: Received command '%.900s' from the client. About to create a child thread.\n", pthread_self() % 1000000000, buffer);
+        pthread_t thread;
 
-            pthread_t thread;
-            pthread_create(&thread, NULL, handle_client, strdup(buffer));
-            pthread_detach(thread);
+        // **Handle LIST Command**
+        if (strncmp(buffer, "LIST", 4) == 0) {
+            pthread_mutex_lock(&lock);
+            if (client_count == 0) {
+                pthread_mutex_unlock(&lock);
+                printf("[Main Thread -- %09lu]: No clients registered. LIST command ignored.\n",
+                       pthread_self() % 1000000000);
+                continue;
+            }
 
-            // **Main Thread Logs AFTER Creating Child Thread**
-            printf("[Main Thread -- %09lu]: Successfully created the child thread [%015lu]\n", pthread_self() % 1000000000, thread % 1000000000000000);
-            printf("[Main Thread -- %09lu]: The child thread [%015lu] successfully exited\n", pthread_self() % 1000000000, thread % 1000000000000000);
+            int* pid_ptr = malloc(sizeof(int));
+            if (!pid_ptr) {
+                perror("malloc failed");
+                pthread_mutex_unlock(&lock);
+                continue;
+            }
+            *pid_ptr = clients[client_count - 1].pid;
+            pthread_mutex_unlock(&lock);
+
+            printf("\n[Main Thread -- %09lu]: Received command 'LIST' from the client (PID %d). About to create a child thread.\n",
+                   pthread_self() % 1000000000, *pid_ptr);
+
+            if (pthread_create(&thread, NULL, handle_list, pid_ptr) == 0) {
+                printf("[Main Thread -- %09lu]: Successfully created the child thread [%015lu]\n",
+                       pthread_self() % 1000000000, (unsigned long)thread);
+                pthread_detach(thread);
+                printf("[Main Thread -- %09lu]: The child thread [%015lu] successfully exited\n",
+                       pthread_self() % 1000000000, (unsigned long)thread);
+            } else {
+                perror("pthread_create failed");
+                free(pid_ptr);
+            }
+        }
+        // **Handle Other Commands (REGISTER, etc.)**
+        else if (strncmp(buffer, "REGISTER ", 9) == 0) {
+            int client_pid;
+            sscanf(buffer + 9, "%d", &client_pid);
+            printf("\n[Main Thread -- %09lu]: Received command 'REGISTER' from the client (PID %d). About to create a child thread.\n",
+                   pthread_self() % 1000000000, client_pid);
+
+            char* cmd_copy = strdup(buffer);
+            if (!cmd_copy) {
+                perror("strdup failed");
+                continue;
+            }
+
+            if (pthread_create(&thread, NULL, handle_client, cmd_copy) == 0) {
+                printf("[Main Thread -- %09lu]: Successfully created the child thread [%015lu]\n",
+                       pthread_self() % 1000000000, (unsigned long)thread);
+                pthread_detach(thread);
+                printf("[Main Thread -- %09lu]: The child thread [%015lu] successfully exited\n",
+                       pthread_self() % 1000000000, (unsigned long)thread);
+            } else {
+                perror("pthread_create failed");
+                free(cmd_copy);
+            }
         }
     }
 
     mq_close(mq);
     return 0;
-} 
+}
