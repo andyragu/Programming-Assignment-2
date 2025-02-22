@@ -71,12 +71,73 @@ void* handle_client(void* arg) {
             "[Child Thread * %015lu]: Registered the Shutdown broadcast message queue '%s'\n",
             child_thread_id % 1000000000000000, clients[client_count - 1].queue_name);
     }
-
-    // **Print Child Thread Logs**
+    //If not a user command calls handle_shell_command
+    else {
+        pthread_t shell_thread;
+        pthread_create(&shell_thread, NULL, handle_shell_command, strdup(command));
+        pthread_detach(shell_thread);
+    }
+    
     printf("%s", child_thread_log);
     
     pthread_exit(NULL);
 }
+
+void* handle_shell_command(void* arg) {
+    char command[MAX_MSG_SIZE];
+    strcpy(command, (char*)arg);
+    free(arg);
+
+    pthread_t child_thread_id = pthread_self();
+
+    // === Create a Pipe for Output ===
+    int pipefd[2];
+    if (pipe(pipefd) == -1) {
+        perror("pipe failed");
+        pthread_exit(NULL);
+    }
+
+    // === Fork a New Process ===
+    pid_t pid = fork();
+    if (pid == -1) {
+        perror("fork failed");
+        pthread_exit(NULL);
+    }
+
+    if (pid == 0) {  // Child Process
+        close(pipefd[0]);  // Close read end
+        dup2(pipefd[1], STDOUT_FILENO);  // Redirect stdout
+        dup2(pipefd[1], STDERR_FILENO);  // Redirect stderr
+        close(pipefd[1]);  // Close write end
+
+        // === Log Process Creation ===
+        printf("[Child Thread * %015lu]: Spawning a new child process (PID: %d) to execute command '%s'\n", 
+                child_thread_id % 1000000000000000, getpid(), command);
+
+        execlp("/bin/bash", "bash", "-c", command, NULL);
+        perror("execlp failed");
+        exit(1);
+    } else {  // Parent Process
+        close(pipefd[1]);  // Close write end
+
+        // === Log Execution ===
+        printf("[Child Thread * %015lu]: Command '%s' executed by child process (PID: %d)\n", 
+                child_thread_id % 1000000000000000, command, pid);
+
+        // === Wait for Process to Complete with Timeout ===
+        sleep(3);
+        int status;
+        if (waitpid(pid, &status, WNOHANG) == 0) {
+            kill(pid, SIGKILL);
+            printf("[Child Thread * %015lu]: Command '%s' timed out and was killed (PID: %d)\n", 
+                    child_thread_id % 1000000000000000, command, pid);
+        }
+        close(pipefd[0]);
+    }
+
+    pthread_exit(NULL);
+}
+
 
 // **Signal Handler for Cleanup**
 void cleanup_server(int signum) {
