@@ -44,26 +44,33 @@ void send_response(const char* queue, const char* response) {
 void* handle_list(void* arg) {
     int client_pid = *((int*)arg);
     free(arg);
-
     char response[MAX_MSG_SIZE] = "Connected Clients:\n";
-    char client_queue[50];
-
-    // Construct the client response queue name (as registered)
-    snprintf(client_queue, sizeof(client_queue), "/client_broadcast_%d", client_pid);
+    char response_queue[50] = "";
+    int found = 0;
 
     pthread_mutex_lock(&lock);
+    // Search for the registered client's queue name and build the list
     for (int i = 0; i < client_count; i++) {
+        if (clients[i].pid == client_pid) {
+            strcpy(response_queue, clients[i].queue_name);
+            found = 1;
+        }
         char client_info[50];
-        snprintf(client_info, sizeof(client_info), "Client %d ==> (PID %d)\n", i + 1, clients[i].pid);
+        snprintf(client_info, sizeof(client_info), "Client %d --> (PID %d)\n", i + 1, clients[i].pid);
         strcat(response, client_info);
     }
     pthread_mutex_unlock(&lock);
 
-    printf("[Server] Sending LIST response to client queue: %s\n", client_queue);
+    if (!found) {
+        printf("[Server] Could not find client with PID %d in client list.\n", client_pid);
+        pthread_exit(NULL);
+    }
+
+    printf("[Server] Sending LIST response to client queue: %s\n", response_queue);
 
     mqd_t client_mq;
     for (int i = 0; i < 5; i++) {  // Retry up to 5 times
-        client_mq = mq_open(client_queue, O_WRONLY);
+        client_mq = mq_open(response_queue, O_WRONLY);
         if (client_mq != (mqd_t)-1) {
             if (mq_send(client_mq, response, strlen(response) + 1, 0) != -1) {
                 mq_close(client_mq);
@@ -87,10 +94,13 @@ void* handle_client(void* arg) {
     pthread_t child_thread_id = pthread_self();
     char queue_name[50];
     int pid = -1;
-   
+
     if (strncmp(command, "REGISTER ", 9) == 0) {
-        sscanf(command + 9, "%d", &pid);
-        snprintf(queue_name, sizeof(queue_name), "/client_broadcast_%d", pid);
+        // Expected format: "REGISTER <pid> <queue_name>"
+        if (sscanf(command + 9, "%d %s", &pid, queue_name) != 2) {
+            printf("[Server] Invalid REGISTER command format.\n");
+            pthread_exit(NULL);
+        }
 
         pthread_mutex_lock(&lock);
         if (client_count < MAX_CLIENTS) {
@@ -102,7 +112,7 @@ void* handle_client(void* arg) {
 
         printf("\n[Child Thread * %015lu]: Registered client (PID: %d) to the client list. Total Clients ---> [%d]\n",
                child_thread_id % 1000000000000000, pid, client_count);
-        printf("[Child Thread * %015lu]: Registered the Shutdown broadcast message queue '%s'\n",
+        printf("[Child Thread * %015lu]: Registered the Response queue '%s'\n",
                child_thread_id % 1000000000000000, queue_name);
     }
 
@@ -126,7 +136,7 @@ int main() {
 
     print_header();
 
-    // Create Message Queue
+    // Create Server Message Queue
     mq = mq_open(SERVER_QUEUE, O_CREAT | O_RDONLY, 0666, &attr);
     if (mq == (mqd_t)-1) {
         perror("mq_open failed");
@@ -144,11 +154,12 @@ int main() {
 
         pthread_t thread;
 
-        // Handle LIST Command: parse the client PID from the command "LIST <pid>"
+        // Handle LIST command: format "LIST <pid>"
         if (strncmp(buffer, "LIST", 4) == 0) {
             int client_pid;
             if (sscanf(buffer, "LIST %d", &client_pid) != 1) {
-                printf("[Main Thread -- %09lu]: LIST command received without client PID. Ignoring.\n", pthread_self() % 1000000000);
+                printf("[Main Thread -- %09lu]: LIST command received without client PID. Ignoring.\n", 
+                       pthread_self() % 1000000000);
                 continue;
             }
             int* pid_ptr = malloc(sizeof(int));
@@ -171,7 +182,7 @@ int main() {
                 free(pid_ptr);
             }
         }
-        // Handle Other Commands (REGISTER, etc.)
+        // Handle other commands (e.g., REGISTER)
         else if (strncmp(buffer, "REGISTER ", 9) == 0) {
             int client_pid;
             sscanf(buffer + 9, "%d", &client_pid);

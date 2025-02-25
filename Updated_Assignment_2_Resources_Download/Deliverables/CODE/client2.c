@@ -1,4 +1,4 @@
-#include <stdio.h> 
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <mqueue.h>
@@ -69,20 +69,6 @@ int main() {
         exit(1);
     }
 
-    // Print formatted intro message
-    printf("--------------------------------------------------\n");
-    printf("####### STUDENTS' REFERENCE SHELL CLIENT #######\n");
-    printf("##################################################\n");
-    printf("####### I am the Parent Process (PID: %d) running this Client #######\n", getpid());
-    printf("--------------------------------------------------\n\n");
-
-    // Send REGISTER command to the server
-    {
-        char register_command[MAX_MSG_SIZE];
-        sprintf(register_command, "REGISTER %d", getpid());
-        mq_send(server_mq, register_command, strlen(register_command) + 1, 0);
-    }
-
     // Create a thread for listening to shutdown messages
     pthread_t thread_ID;
     mqd_t* shutdown_mq_ptr = malloc(sizeof(mqd_t));
@@ -93,14 +79,22 @@ int main() {
     *shutdown_mq_ptr = shutdown_mq;
     pthread_create(&thread_ID, NULL, listen_for_shutdown, shutdown_mq_ptr);
 
-    // Ensure Proper Thread ID Formatting
+    // Ensure proper thread ID formatting and print startup messages only once
     unsigned long main_thread_id = pthread_self() % 1000000000;
     unsigned long child_thread_id = (unsigned long)thread_ID;
+    printf("<client-2> [Main Thread -- %09lu]: I am the Client's Main Thread. My Parent Process is (PID: %d)...\n",
+           main_thread_id, getpid());
+    printf("<client-2> [Main Thread -- %09lu]: Created a Child Thread [%015lu] for listening to the server's SHUTDOWN broadcast message...\n",
+           main_thread_id, child_thread_id);
+    printf("<client-2> [Main Thread -- %09lu]: Client initialized. Enter commands (type 'EXIT' to quit)...\n",
+           main_thread_id);
 
-    // Print startup messages
-    printf("<client-2> [Main Thread -- %09lu]: I am the Client's Main Thread. My Parent Process is (PID: %d)...\n", main_thread_id, getpid());
-    printf("\n<client-2> [Main Thread -- %09lu]: Created a Child Thread [%015lu] for listening to the server's SHUTDOWN broadcast message...\n", main_thread_id, child_thread_id);
-    printf("\n<client-2> [Main Thread -- %09lu]: Client initialized. Enter commands (type 'EXIT' to quit)...\n", main_thread_id);
+    // Send REGISTER command to the server (including our response queue name)
+    {
+        char register_command[MAX_MSG_SIZE];
+        sprintf(register_command, "REGISTER %d %s", getpid(), client_response_queue_name);
+        mq_send(server_mq, register_command, strlen(register_command) + 1, 0);
+    }
 
     // Main input loop
     while (1) {
@@ -110,7 +104,7 @@ int main() {
         fgets(command, MAX_MSG_SIZE, stdin);
         command[strcspn(command, "\n")] = 0;
 
-        // Handle CHPT new_prompt (Client Side)
+        // Handle CHPT command to change prompt
         if (strncmp(command, "CHPT ", 5) == 0) {
             char new_prompt[MAX_MSG_SIZE];
             sscanf(command + 5, "%1022s", new_prompt);
@@ -121,21 +115,21 @@ int main() {
 
         // Handle EXIT command
         if (strcmp(command, "EXIT") == 0) {
-            printf("\n==================================================================");
-            printf("\n<client-2> [Main Thread -- %09lu]: Gracefully exiting...\n", main_thread_id);
+            printf("\n==================================================================\n");
+            printf("<client-2> [Main Thread -- %09lu]: Gracefully exiting...\n", main_thread_id);
             printf("<client-2> [Main Thread -- %09lu]: Resource cleanup complete...\n", main_thread_id);
             printf("<client-2> [Main Thread -- %09lu]: Shutting down...\n", main_thread_id);
             break;
         }
 
-        // For the LIST command, append the PID so the server knows where to reply
+        // For the LIST command, send the command with our PID and then print the response with the desired format
         if (strcmp(command, "LIST") == 0) {
             char list_command[MAX_MSG_SIZE];
             sprintf(list_command, "LIST %d", getpid());
             mq_send(server_mq, list_command, strlen(list_command) + 1, 0);
 
             char response[MAX_MSG_SIZE];
-            printf("\n<client-2> Waiting for server response...\n");
+            printf("\n<client-2> [Main Thread -- %09lu]: Waiting for server response...\n", main_thread_id);
 
             struct timespec timeout;
             clock_gettime(CLOCK_REALTIME, &timeout);
@@ -143,20 +137,22 @@ int main() {
 
             ssize_t bytes_read;
             while ((bytes_read = mq_timedreceive(client_mq, response, MAX_MSG_SIZE, NULL, &timeout)) == -1 && errno == EAGAIN) {
-                printf("<client-2> No message yet, retrying...\n");
+                printf("<client-2> [Main Thread -- %09lu]: No message yet, retrying...\n", main_thread_id);
                 usleep(50000);
             }
 
             if (bytes_read > 0) {
                 response[bytes_read] = '\0';
-                printf("\n<client-2> Server Response:\n%s\n", response);
+                printf("\n<client-2> [Main Thread -- %09lu]: Received server response\n", main_thread_id);
+                printf("===============================================================\n");
+                printf("%s\n", response);
             } else {
                 perror("<client-2> Failed to receive LIST response");
             }
             continue;
         }
 
-        // For other commands, send as is
+        // For other commands, send them as is
         mq_send(server_mq, command, strlen(command) + 1, 0);
     }
 
