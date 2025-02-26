@@ -5,14 +5,19 @@
 #include <pthread.h>
 #include <unistd.h>
 #include <signal.h>
+#include <errno.h>
+#include <sys/wait.h>
+#include <fcntl.h>
 
 #define SERVER_QUEUE "/server_queue"
 #define MAX_MSG_SIZE 1024
 #define MAX_CLIENTS 10
 
+// Updated Client structure with a visible flag.
 typedef struct {
     int pid;
     char queue_name[50];
+    int visible;  // 1 = visible; 0 = hidden.
 } Client;
 
 Client clients[MAX_CLIENTS];
@@ -40,7 +45,8 @@ void send_response(const char* queue, const char* response) {
     }
 }
 
-// Thread to Handle LIST Command
+// Handler for LIST command: "LIST <pid>"
+// This function builds the response and sends it.
 void* handle_list(void* arg) {
     int client_pid = *((int*)arg);
     free(arg);
@@ -49,27 +55,28 @@ void* handle_list(void* arg) {
     int found = 0;
 
     pthread_mutex_lock(&lock);
-    // Search for the registered client's queue name and build the list
     for (int i = 0; i < client_count; i++) {
         if (clients[i].pid == client_pid) {
             strcpy(response_queue, clients[i].queue_name);
             found = 1;
         }
-        char client_info[50];
-        snprintf(client_info, sizeof(client_info), "Client %d --> (PID %d)\n", i + 1, clients[i].pid);
-        strcat(response, client_info);
+        if (clients[i].visible) {
+            char client_info[50];
+            snprintf(client_info, sizeof(client_info), "Client %d --> (PID %d)\n", i + 1, clients[i].pid);
+            strcat(response, client_info);
+        }
     }
     pthread_mutex_unlock(&lock);
 
     if (!found) {
-        printf("[Server] Could not find client with PID %d in client list.\n", client_pid);
+        printf("[Main Thread -- %09lu]: Could not find client with PID %d in client list.\n",
+               pthread_self() % 1000000000, client_pid);
         pthread_exit(NULL);
     }
 
     printf("[Server] Sending LIST response to client queue: %s\n", response_queue);
-
     mqd_t client_mq;
-    for (int i = 0; i < 5; i++) {  // Retry up to 5 times
+    for (int i = 0; i < 5; i++) {
         client_mq = mq_open(response_queue, O_WRONLY);
         if (client_mq != (mqd_t)-1) {
             if (mq_send(client_mq, response, strlen(response) + 1, 0) != -1) {
@@ -78,55 +85,275 @@ void* handle_list(void* arg) {
             }
             mq_close(client_mq);
         }
-        usleep(100000);  // Sleep 100ms before retrying
+        usleep(100000);
     }
-
     perror("[Server] Failed to send LIST response after retries");
     pthread_exit(NULL);
 }
 
-// Client Handler (Child Thread)
+// Handler for HIDE command: "HIDE <pid>"
+void* handle_hide(void* arg) {
+    char command[MAX_MSG_SIZE];
+    strcpy(command, (char*)arg);
+    free(arg);
+    int pid;
+    if (sscanf(command, "HIDE %d", &pid) != 1) {
+        pthread_exit(NULL);
+    }
+    int found = 0;
+    pthread_mutex_lock(&lock);
+    for (int i = 0; i < client_count; i++) {
+        if (clients[i].pid == pid) {
+            found = 1;
+            if (clients[i].visible == 0) {
+                pthread_mutex_unlock(&lock);
+                send_response(clients[i].queue_name, "You Are Already Hidden...");
+            } else {
+                clients[i].visible = 0;
+                pthread_mutex_unlock(&lock);
+                send_response(clients[i].queue_name, "You Are Now Hidden...");
+            }
+            break;
+        }
+    }
+    if (!found) {
+        pthread_mutex_unlock(&lock);
+        printf("[Main Thread -- %09lu]: HIDE: Client with PID %d not found.\n",
+               pthread_self() % 1000000000, pid);
+    }
+    pthread_exit(NULL);
+}
+
+// Handler for UNHIDE command: "UNHIDE <pid>"
+void* handle_unhide(void* arg) {
+    char command[MAX_MSG_SIZE];
+    strcpy(command, (char*)arg);
+    free(arg);
+    int pid;
+    if (sscanf(command, "UNHIDE %d", &pid) != 1) {
+        pthread_exit(NULL);
+    }
+    int found = 0;
+    pthread_mutex_lock(&lock);
+    for (int i = 0; i < client_count; i++) {
+        if (clients[i].pid == pid) {
+            found = 1;
+            if (clients[i].visible == 1) {
+                pthread_mutex_unlock(&lock);
+                send_response(clients[i].queue_name, "You Are Not Hidden At All...");
+            } else {
+                clients[i].visible = 1;
+                pthread_mutex_unlock(&lock);
+                send_response(clients[i].queue_name, "You Are Now Visible Again...");
+            }
+            break;
+        }
+    }
+    if (!found) {
+        pthread_mutex_unlock(&lock);
+        printf("[Main Thread -- %09lu]: UNHIDE: Client with PID %d not found.\n",
+               pthread_self() % 1000000000, pid);
+    }
+    pthread_exit(NULL);
+}
+
+// Handler for uppercase EXIT command: "EXIT <pid>"
+// Disconnects the client.
+void* handle_exit(void* arg) {
+    char command[MAX_MSG_SIZE];
+    strcpy(command, (char*)arg);
+    free(arg);
+    int pid;
+    if (sscanf(command, "EXIT %d", &pid) != 1) {
+        pthread_exit(NULL);
+    }
+    int index = -1;
+    pthread_mutex_lock(&lock);
+    for (int i = 0; i < client_count; i++) {
+        if (clients[i].pid == pid) {
+            index = i;
+            break;
+        }
+    }
+    if (index != -1) {
+        char queue_name[50];
+        strcpy(queue_name, clients[index].queue_name);
+        for (int j = index; j < client_count - 1; j++) {
+            clients[j] = clients[j+1];
+        }
+        client_count--;
+        pthread_mutex_unlock(&lock);
+        send_response(queue_name, "Client disconnected.");
+    } else {
+        pthread_mutex_unlock(&lock);
+    }
+    pthread_exit(NULL);
+}
+
+// Handler for lowercase exit command: "exit <pid>"
+// This command is ignored.
+void* handle_lower_exit(void* arg) {
+    char command[MAX_MSG_SIZE];
+    strcpy(command, (char*)arg);
+    free(arg);
+    int pid;
+    if (sscanf(command, "exit %d", &pid) != 1) {
+        pthread_exit(NULL);
+    }
+    char queue_name[50] = "";
+    int found = 0;
+    pthread_mutex_lock(&lock);
+    for (int i = 0; i < client_count; i++) {
+        if (clients[i].pid == pid) {
+            strcpy(queue_name, clients[i].queue_name);
+            found = 1;
+            break;
+        }
+    }
+    pthread_mutex_unlock(&lock);
+    if (found) {
+        send_response(queue_name, "Ignored 'exit' command as it may Exit the Shell Session...");
+    }
+    pthread_exit(NULL);
+}
+
+// Handler for SHELL command: "SHELL <pid> <command string>"
+// Executes the shell command with a 3-second timeout.
+void* handle_shell_command(void* arg) {
+    char *msg = (char*) arg;
+    int pid;
+    char shell_cmd[MAX_MSG_SIZE];
+    if (sscanf(msg, "SHELL %d %[^\n]", &pid, shell_cmd) != 2) {
+        free(msg);
+        pthread_exit(NULL);
+    }
+    free(msg);
+    int pipefd[2];
+    if (pipe(pipefd) == -1) {
+        perror("pipe failed");
+        pthread_exit(NULL);
+    }
+    pid_t child_pid = fork();
+    if (child_pid == -1) {
+        perror("fork failed");
+        close(pipefd[0]);
+        close(pipefd[1]);
+        pthread_exit(NULL);
+    }
+    if (child_pid == 0) {  // Child process
+        close(pipefd[0]);
+        dup2(pipefd[1], STDOUT_FILENO);
+        dup2(pipefd[1], STDERR_FILENO);
+        close(pipefd[1]);
+        execlp("/bin/bash", "bash", "-c", shell_cmd, NULL);
+        perror("execlp failed");
+        exit(1);
+    } else {
+        close(pipefd[1]);
+        int status;
+        int waited = 0;
+        while (waited < 30) {  // 30*100ms = 3 seconds
+            pid_t result = waitpid(child_pid, &status, WNOHANG);
+            if (result == 0) {
+                usleep(100000);
+                waited++;
+            } else {
+                break;
+            }
+        }
+        if (waited >= 30) {
+            kill(child_pid, SIGKILL);
+            waitpid(child_pid, &status, 0);
+            char timeout_msg[] = "Command Timeout...";
+            char client_queue[50] = "";
+            int found = 0;
+            pthread_mutex_lock(&lock);
+            for (int i = 0; i < client_count; i++) {
+                if (clients[i].pid == pid) {
+                    strcpy(client_queue, clients[i].queue_name);
+                    found = 1;
+                    break;
+                }
+            }
+            pthread_mutex_unlock(&lock);
+            if (found)
+                send_response(client_queue, timeout_msg);
+            pthread_exit(NULL);
+        } else {
+            char output[MAX_MSG_SIZE];
+            int n = read(pipefd[0], output, MAX_MSG_SIZE - 1);
+            if (n < 0) n = 0;
+            output[n] = '\0';
+            close(pipefd[0]);
+            char client_queue[50] = "";
+            int found = 0;
+            pthread_mutex_lock(&lock);
+            for (int i = 0; i < client_count; i++) {
+                if (clients[i].pid == pid) {
+                    strcpy(client_queue, clients[i].queue_name);
+                    found = 1;
+                    break;
+                }
+            }
+            pthread_mutex_unlock(&lock);
+            if (found) {
+                if (strlen(output) == 0)
+                    send_response(client_queue, "Command executed with no output.");
+                else
+                    send_response(client_queue, output);
+            }
+            pthread_exit(NULL);
+        }
+    }
+}
+
+// Handler for client registration: "REGISTER <pid> <queue_name>"
 void* handle_client(void* arg) {
     char command[MAX_MSG_SIZE];
     strcpy(command, (char*)arg);
     free(arg);
-
     pthread_t child_thread_id = pthread_self();
     char queue_name[50];
     int pid = -1;
-
     if (strncmp(command, "REGISTER ", 9) == 0) {
-        // Expected format: "REGISTER <pid> <queue_name>"
         if (sscanf(command + 9, "%d %s", &pid, queue_name) != 2) {
-            printf("[Server] Invalid REGISTER command format.\n");
+            printf("[Main Thread -- %09lu]: Invalid REGISTER command format.\n", pthread_self() % 1000000000);
             pthread_exit(NULL);
         }
-
         pthread_mutex_lock(&lock);
         if (client_count < MAX_CLIENTS) {
             clients[client_count].pid = pid;
             strcpy(clients[client_count].queue_name, queue_name);
+            clients[client_count].visible = 1;  // Visible by default.
             client_count++;
         }
         pthread_mutex_unlock(&lock);
-
         printf("\n[Child Thread * %015lu]: Registered client (PID: %d) to the client list. Total Clients ---> [%d]\n",
                child_thread_id % 1000000000000000, pid, client_count);
-        printf("[Child Thread * %015lu]: Registered the Response queue '%s'\n",
+        printf("[Child Thread * %015lu]: Registered the Shutdown broadcast message queue '%s'\n",
                child_thread_id % 1000000000000000, queue_name);
     }
-
     pthread_exit(NULL);
 }
 
-// Signal Handler for Cleanup
+// Signal handler for cleanup and SHUTDOWN broadcast
 void cleanup_server(int signum) {
     printf("\n[Server] Shutting down...\n");
+    pthread_mutex_lock(&lock);
+    for (int i = 0; i < client_count; i++) {
+         mqd_t mq = mq_open(clients[i].queue_name, O_WRONLY);
+         if (mq != (mqd_t)-1) {
+              char shutdown_msg[] = "SHUTDOWN";
+              mq_send(mq, shutdown_msg, strlen(shutdown_msg) + 1, 0);
+              mq_close(mq);
+         }
+    }
+    pthread_mutex_unlock(&lock);
     mq_unlink(SERVER_QUEUE);
     exit(0);
 }
 
-// Main Server Function
+// Main server function
 int main() {
     mqd_t mq;
     struct mq_attr attr = {0, 10, MAX_MSG_SIZE, 0};
@@ -136,7 +363,6 @@ int main() {
 
     print_header();
 
-    // Create Server Message Queue
     mq = mq_open(SERVER_QUEUE, O_CREAT | O_RDONLY, 0666, &attr);
     if (mq == (mqd_t)-1) {
         perror("mq_open failed");
@@ -151,129 +377,116 @@ int main() {
             continue;
         }
         buffer[bytes_read] = '\0';
-
         pthread_t thread;
 
-        // Handle LIST command: format "LIST <pid>"
-        if (strncmp(buffer, "LIST", 4) == 0) {
+        if (strncmp(buffer, "REGISTER ", 9) == 0) {
+            int client_pid;
+            sscanf(buffer + 9, "%d", &client_pid);
+            printf("\n[Main Thread -- %09lu]: Received command 'REGISTER' from the client (PID %d). About to create a child thread.\n",
+                   pthread_self() % 1000000000, client_pid);
+            if (pthread_create(&thread, NULL, handle_client, strdup(buffer)) == 0) {
+                printf("[Main Thread -- %09lu]: Successfully created the child thread [%015lu]\n",
+                       pthread_self() % 1000000000, (unsigned long) thread);
+                pthread_detach(thread);
+                printf("[Main Thread -- %09lu]: The child thread [%015lu] successfully exited\n",
+                       pthread_self() % 1000000000, (unsigned long) thread);
+            } else {
+                perror("pthread_create failed");
+            }
+        }
+        else if (strncmp(buffer, "LIST", 4) == 0) {
             int client_pid;
             if (sscanf(buffer, "LIST %d", &client_pid) != 1) {
-                printf("[Main Thread -- %09lu]: LIST command received without client PID. Ignoring.\n", 
+                printf("[Main Thread -- %09lu]: LIST command received without client PID. Ignoring.\n",
                        pthread_self() % 1000000000);
                 continue;
             }
             int* pid_ptr = malloc(sizeof(int));
-            if (!pid_ptr) {
-                perror("malloc failed");
-                continue;
-            }
+            if (!pid_ptr) continue;
             *pid_ptr = client_pid;
             printf("\n[Main Thread -- %09lu]: Received command 'LIST' from the client (PID %d). About to create a child thread.\n",
                    pthread_self() % 1000000000, client_pid);
-
             if (pthread_create(&thread, NULL, handle_list, pid_ptr) == 0) {
                 printf("[Main Thread -- %09lu]: Successfully created the child thread [%015lu]\n",
-                       pthread_self() % 1000000000, (unsigned long)thread);
+                       pthread_self() % 1000000000, (unsigned long) thread);
                 pthread_detach(thread);
                 printf("[Main Thread -- %09lu]: The child thread [%015lu] successfully exited\n",
-                       pthread_self() % 1000000000, (unsigned long)thread);
+                       pthread_self() % 1000000000, (unsigned long) thread);
             } else {
                 perror("pthread_create failed");
                 free(pid_ptr);
             }
         }
-        // Handle other commands (e.g., REGISTER)
-        else if (strncmp(buffer, "REGISTER ", 9) == 0) {
-            int client_pid;
-            sscanf(buffer + 9, "%d", &client_pid);
-            printf("\n[Main Thread -- %09lu]: Received command 'REGISTER' from the client (PID %d). About to create a child thread.\n",
-                   pthread_self() % 1000000000, client_pid);
-
-            char* cmd_copy = strdup(buffer);
-            if (!cmd_copy) {
-                perror("strdup failed");
-                continue;
-            }
-
-            if (pthread_create(&thread, NULL, handle_client, cmd_copy) == 0) {
+        else if (strncmp(buffer, "HIDE", 4) == 0) {
+            printf("\n[Main Thread -- %09lu]: Received command 'HIDE' from the client (PID %d). About to create a child thread.\n",
+                   pthread_self() % 1000000000, atoi(strchr(buffer, ' ') + 1));
+            if (pthread_create(&thread, NULL, handle_hide, strdup(buffer)) == 0) {
                 printf("[Main Thread -- %09lu]: Successfully created the child thread [%015lu]\n",
-                       pthread_self() % 1000000000, (unsigned long)thread);
+                       pthread_self() % 1000000000, (unsigned long) thread);
                 pthread_detach(thread);
                 printf("[Main Thread -- %09lu]: The child thread [%015lu] successfully exited\n",
-                       pthread_self() % 1000000000, (unsigned long)thread);
+                       pthread_self() % 1000000000, (unsigned long) thread);
             } else {
                 perror("pthread_create failed");
-                free(cmd_copy);
             }
+        }
+        else if (strncmp(buffer, "UNHIDE", 6) == 0) {
+            printf("\n[Main Thread -- %09lu]: Received command 'UNHIDE' from the client (PID %d). About to create a child thread.\n",
+                   pthread_self() % 1000000000, atoi(strchr(buffer, ' ') + 1));
+            if (pthread_create(&thread, NULL, handle_unhide, strdup(buffer)) == 0) {
+                printf("[Main Thread -- %09lu]: Successfully created the child thread [%015lu]\n",
+                       pthread_self() % 1000000000, (unsigned long) thread);
+                pthread_detach(thread);
+                printf("[Main Thread -- %09lu]: The child thread [%015lu] successfully exited\n",
+                       pthread_self() % 1000000000, (unsigned long) thread);
+            } else {
+                perror("pthread_create failed");
+            }
+        }
+        else if (strncmp(buffer, "EXIT", 4) == 0) {
+            printf("\n[Main Thread -- %09lu]: Received command 'EXIT' from the client (PID %d). About to create a child thread.\n",
+                   pthread_self() % 1000000000, atoi(strchr(buffer, ' ') + 1));
+            if (pthread_create(&thread, NULL, handle_exit, strdup(buffer)) == 0) {
+                printf("[Main Thread -- %09lu]: Successfully created the child thread [%015lu]\n",
+                       pthread_self() % 1000000000, (unsigned long) thread);
+                pthread_detach(thread);
+                printf("[Main Thread -- %09lu]: The child thread [%015lu] successfully exited\n",
+                       pthread_self() % 1000000000, (unsigned long) thread);
+            } else {
+                perror("pthread_create failed");
+            }
+        }
+        else if (strncmp(buffer, "exit", 4) == 0) {
+            printf("\n[Main Thread -- %09lu]: Received command 'exit' from the client (PID %d). About to create a child thread.\n",
+                   pthread_self() % 1000000000, atoi(strchr(buffer, ' ') + 1));
+            if (pthread_create(&thread, NULL, handle_lower_exit, strdup(buffer)) == 0) {
+                printf("[Main Thread -- %09lu]: Successfully created the child thread [%015lu]\n",
+                       pthread_self() % 1000000000, (unsigned long) thread);
+                pthread_detach(thread);
+                printf("[Main Thread -- %09lu]: The child thread [%015lu] successfully exited\n",
+                       pthread_self() % 1000000000, (unsigned long) thread);
+            } else {
+                perror("pthread_create failed");
+            }
+        }
+        else if (strncmp(buffer, "SHELL ", 6) == 0) {
+            printf("\n[Main Thread -- %09lu]: Received command 'SHELL' from the client (PID %d). About to create a child thread.\n",
+                   pthread_self() % 1000000000, atoi(strchr(buffer, ' ') + 1));
+            if (pthread_create(&thread, NULL, handle_shell_command, strdup(buffer)) == 0) {
+                printf("[Main Thread -- %09lu]: Successfully created the child thread [%015lu]\n",
+                       pthread_self() % 1000000000, (unsigned long) thread);
+                pthread_detach(thread);
+                printf("[Main Thread -- %09lu]: The child thread [%015lu] successfully exited\n",
+                       pthread_self() % 1000000000, (unsigned long) thread);
+            } else {
+                perror("pthread_create failed");
+            }
+        }
+        else {
+            printf("[Server] Unknown command received: %s\n", buffer);
         }
     }
 
     mq_close(mq);
     return 0;
 }
-
-
-/* else {
-    pthread_t shell_thread;
-    pthread_create(&shell_thread, NULL, handle_shell_command, strdup(command));
-    pthread_detach(shell_thread);
-}
-
-
-void* handle_shell_command(void* arg) {
-    char command[MAX_MSG_SIZE];
-    strcpy(command, (char*)arg);
-    free(arg);
-
-    pthread_t child_thread_id = pthread_self();
-
-    // === Create a Pipe for Output ===
-    int pipefd[2];
-    if (pipe(pipefd) == -1) {
-        perror("pipe failed");
-        pthread_exit(NULL);
-    }
-
-    // === Fork a New Process ===
-    pid_t pid = fork();
-    if (pid == -1) {
-        perror("fork failed");
-        pthread_exit(NULL);
-    }
-
-    if (pid == 0) {  // Child Process
-        close(pipefd[0]);  // Close read end
-        dup2(pipefd[1], STDOUT_FILENO);  // Redirect stdout
-        dup2(pipefd[1], STDERR_FILENO);  // Redirect stderr
-        close(pipefd[1]);  // Close write end
-
-        // === Log Process Creation ===
-        printf("[Child Thread * %015lu]: Spawning a new child process (PID: %d) to execute command '%s'\n", 
-                child_thread_id % 1000000000000000, getpid(), command);
-
-        execlp("/bin/bash", "bash", "-c", command, NULL);
-        perror("execlp failed");
-        exit(1);
-    } else {  // Parent Process
-        close(pipefd[1]);  // Close write end
-
-        // === Log Execution ===
-        printf("[Child Thread * %015lu]: Command '%s' executed by child process (PID: %d)\n", 
-                child_thread_id % 1000000000000000, command, pid);
-
-        // === Wait for Process to Complete with Timeout ===
-        sleep(3);
-        int status;
-        if (waitpid(pid, &status, WNOHANG) == 0) {
-            kill(pid, SIGKILL);
-            printf("[Child Thread * %015lu]: Command '%s' timed out and was killed (PID: %d)\n", 
-                    child_thread_id % 1000000000000000, command, pid);
-        }
-        close(pipefd[0]);
-    }
-
-    pthread_exit(NULL);
-}
-
-
- */
