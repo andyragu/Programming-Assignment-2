@@ -53,6 +53,7 @@ void* handle_list(void* arg) {
     char response[MAX_MSG_SIZE] = "Connected Clients:\n";
     char response_queue[50] = "";
     int found = 0;
+    int visible_clients = 0;  // Add a counter for visible clients
 
     pthread_mutex_lock(&lock);
     for (int i = 0; i < client_count; i++) {
@@ -61,11 +62,18 @@ void* handle_list(void* arg) {
             found = 1;
         }
         if (clients[i].visible) {
+            visible_clients++;  // Increment counter for each visible client
             char client_info[50];
             snprintf(client_info, sizeof(client_info), "Client %d --> (PID %d)\n", i + 1, clients[i].pid);
             strcat(response, client_info);
         }
     }
+    
+    // If no visible clients were found, update the response
+    if (visible_clients == 0 && client_count > 0) {
+        strcpy(response, "Connected Clients:\nAll clients are hidden.\n");
+    }
+    
     pthread_mutex_unlock(&lock);
 
     if (!found) {
@@ -167,6 +175,11 @@ void* handle_exit(void* arg) {
     if (sscanf(command, "EXIT %d", &pid) != 1) {
         pthread_exit(NULL);
     }
+    
+    // Print the cleanup message
+    printf("[Child Thread * %015lu]: Cleaning up client (PID %d) resources...\n",
+           pthread_self() % 1000000000000000, pid);
+    
     int index = -1;
     pthread_mutex_lock(&lock);
     for (int i = 0; i < client_count; i++) {
@@ -488,5 +501,6 @@ int main() {
     }
 
     mq_close(mq);
+
     return 0;
 }
