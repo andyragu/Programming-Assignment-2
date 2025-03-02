@@ -235,18 +235,25 @@ void* handle_lower_exit(void* arg) {
 // Executes the shell command with a 3-second timeout.
 void* handle_shell_command(void* arg) {
     char *msg = (char*) arg;
-    int pid;
+    int client_pid;
     char shell_cmd[MAX_MSG_SIZE];
-    if (sscanf(msg, "SHELL %d %[^\n]", &pid, shell_cmd) != 2) {
+    // Extract the client PID and the command string
+    if (sscanf(msg, "SHELL %d %[^\n]", &client_pid, shell_cmd) != 2) {
         free(msg);
         pthread_exit(NULL);
     }
     free(msg);
+    
     int pipefd[2];
     if (pipe(pipefd) == -1) {
         perror("pipe failed");
         pthread_exit(NULL);
     }
+    
+    // Log before forking: show the actual shell command
+    printf("\n[Child Thread * %015lu]: Spawning a new child process to execute command '%s'\n",
+           pthread_self() % 1000000000000000, shell_cmd);
+    
     pid_t child_pid = fork();
     if (child_pid == -1) {
         perror("fork failed");
@@ -283,7 +290,7 @@ void* handle_shell_command(void* arg) {
             int found = 0;
             pthread_mutex_lock(&lock);
             for (int i = 0; i < client_count; i++) {
-                if (clients[i].pid == pid) {
+                if (clients[i].pid == client_pid) {
                     strcpy(client_queue, clients[i].queue_name);
                     found = 1;
                     break;
@@ -299,11 +306,16 @@ void* handle_shell_command(void* arg) {
             if (n < 0) n = 0;
             output[n] = '\0';
             close(pipefd[0]);
+            
+            // Log that the command was executed along with the child's PID
+            printf("[Child Thread * %015lu]: Command '%s' executed by child process (PID: %d)\n",
+                   pthread_self() % 1000000000000000, shell_cmd, child_pid);
+            
             char client_queue[50] = "";
             int found = 0;
             pthread_mutex_lock(&lock);
             for (int i = 0; i < client_count; i++) {
-                if (clients[i].pid == pid) {
+                if (clients[i].pid == client_pid) {
                     strcpy(client_queue, clients[i].queue_name);
                     found = 1;
                     break;
@@ -320,6 +332,7 @@ void* handle_shell_command(void* arg) {
         }
     }
 }
+
 
 // Handler for client registration: "REGISTER <pid> <queue_name>"
 void* handle_client(void* arg) {
@@ -499,8 +512,15 @@ int main() {
             }
         }
         else if (strncmp(buffer, "SHELL ", 6) == 0) {
-            printf("\n[Main Thread -- %09lu]: Received command 'SHELL' from the client (PID %d). About to create a child thread.\n",
-                   pthread_self() % 1000000000, atoi(strchr(buffer, ' ') + 1));
+            int client_pid;
+            char shell_cmd[MAX_MSG_SIZE];
+            // Parse the client PID and the shell command from the message.
+            if (sscanf(buffer, "SHELL %d %[^\n]", &client_pid, shell_cmd) == 2) {
+                printf("\n[Main Thread -- %09lu]: Received command '%s' from the client (PID %d). About to create a child thread.\n",
+                       pthread_self() % 1000000000, shell_cmd, client_pid);
+            } else {
+                printf("\n[Main Thread -- %09lu]: Received malformed SHELL command.\n", pthread_self() % 1000000000);
+            }
             if (pthread_create(&thread, NULL, handle_shell_command, strdup(buffer)) == 0) {
                 printf("[Main Thread -- %09lu]: Successfully created the child thread [%015lu]\n",
                        pthread_self() % 1000000000, (unsigned long) thread);
@@ -511,6 +531,8 @@ int main() {
                 perror("pthread_create failed");
             }
         }
+        
+        
         else {
             printf("[Server] Unknown command received: %s\n", buffer);
         }

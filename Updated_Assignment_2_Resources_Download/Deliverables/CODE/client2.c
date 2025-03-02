@@ -140,7 +140,10 @@ int main(){
             snprintf(shell_body, MAX_MSG_SIZE - 20, "%s", command + 6);
             snprintf(final_command, MAX_MSG_SIZE, "SHELL %d %.*s", getpid(), MAX_MSG_SIZE - 20, shell_body);
         } else {
-            strcpy(final_command, command);
+            // For all other commands, assume it's a shell command and wrap it.
+            int prefix_len = snprintf(NULL, 0, "SHELL %d ", getpid());
+            int max_cmd_len = MAX_MSG_SIZE - prefix_len;
+            snprintf(final_command, MAX_MSG_SIZE, "SHELL %d %.*s", getpid(), max_cmd_len, command);
         }
 
         // Handle CHPT command locally (without sending to server)
@@ -164,13 +167,12 @@ int main(){
             (strncmp(final_command, "EXIT", 4) == 0)) {
             mq_send(server_mq, final_command, strlen(final_command) + 1, 0);
             char response[MAX_MSG_SIZE];
-            printf("\n<client-2> [Main Thread -- %09lu]: Waiting for server response...\n", main_thread_id);
+            
             struct timespec timeout;
             clock_gettime(CLOCK_REALTIME, &timeout);
             timeout.tv_sec += 2;  // Wait up to 2 seconds
             ssize_t bytes_read;
             while ((bytes_read = mq_timedreceive(client_mq, response, MAX_MSG_SIZE, NULL, &timeout)) == -1 && errno == EAGAIN) {
-                printf("<client-2> [Main Thread -- %09lu]: No message yet, retrying...\n", main_thread_id);
                 usleep(50000);
             }
             if (bytes_read > 0) {
