@@ -178,7 +178,7 @@ void* handle_exit(void* arg) {
     }
     
     // Print the cleanup message
-    printf("[Child Thread * %015lu]: Cleaning up client (PID %d) resources...\n",
+    printf("\n[Child Thread * %015lu]: Cleaning up client (PID %d) resources...\n",
            pthread_self() % 1000000000000000, pid);
     
     int index = -1;
