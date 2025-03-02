@@ -10,6 +10,7 @@
 #include <fcntl.h>
 
 #define SERVER_QUEUE "/server_queue"
+#define CLIENT_SHUTDOWN_QUEUE_PREFIX "/client_shutdown_"
 #define MAX_MSG_SIZE 1024
 #define MAX_CLIENTS 10
 
@@ -349,22 +350,37 @@ void* handle_client(void* arg) {
     pthread_exit(NULL);
 }
 
+
 // Signal handler for cleanup and SHUTDOWN broadcast
 void cleanup_server(int signum) {
-    printf("\n[Server] Shutting down...\n");
+    unsigned long main_thread_id = pthread_self() % 1000000000;
+
+    printf("\n----------------------------------------------------------------------\n");
+    printf("[Main Thread -- %09lu]: Signal %d received...\n", main_thread_id, signum);
+    printf("[Main Thread -- %09lu]: Gracefully exiting...\n", main_thread_id);
+    printf("[Main Thread -- %09lu]: Cleaning up server and client resources...\n", main_thread_id);
+    printf("[Main Thread -- %09lu]: Broadcasting 'SHUTDOWN' message to all the clients...\n", main_thread_id);
+
+    // Send SHUTDOWN message to all clients without extra logs
     pthread_mutex_lock(&lock);
     for (int i = 0; i < client_count; i++) {
-         mqd_t mq = mq_open(clients[i].queue_name, O_WRONLY);
-         if (mq != (mqd_t)-1) {
-              char shutdown_msg[] = "SHUTDOWN";
-              mq_send(mq, shutdown_msg, strlen(shutdown_msg) + 1, 0);
-              mq_close(mq);
-         }
+        char shutdown_queue[50];
+        snprintf(shutdown_queue, sizeof(shutdown_queue), "/client_shutdown_%d", clients[i].pid);
+        mqd_t mq = mq_open(shutdown_queue, O_WRONLY);
+        if (mq != (mqd_t)-1) {
+            char shutdown_msg[] = "SHUTDOWN";
+            mq_send(mq, shutdown_msg, strlen(shutdown_msg) + 1, 0);
+            mq_close(mq);
+        }
     }
     pthread_mutex_unlock(&lock);
+
+    // Cleanup
     mq_unlink(SERVER_QUEUE);
     exit(0);
 }
+
+
 
 // Main server function
 int main() {

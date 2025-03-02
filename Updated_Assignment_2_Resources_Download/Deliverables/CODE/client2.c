@@ -9,33 +9,51 @@
 
 #define SERVER_QUEUE "/server_queue"
 #define CLIENT_RESPONSE_QUEUE_PREFIX "/client2_broadcast_"
-#define CLIENT_SHUTDOWN_QUEUE_PREFIX "/client2_shutdown_"
+#define CLIENT_SHUTDOWN_QUEUE_PREFIX "/client_shutdown_"
 #define MAX_MSG_SIZE 1024
 
 char client_response_queue_name[50];
 char client_shutdown_queue_name[50];
 mqd_t client_mq;  // Response queue descriptor
 
+
 // Thread to listen for SHUTDOWN messages
 void* listen_for_shutdown(void* arg) {
     mqd_t shutdown_mq = *((mqd_t*) arg);
     free(arg);
     char buffer[MAX_MSG_SIZE];
+    unsigned long main_thread_id = pthread_self() % 1000000000;
+
     while (1) {
         ssize_t bytes_read = mq_receive(shutdown_mq, buffer, MAX_MSG_SIZE, NULL);
         if (bytes_read > 0) {
             buffer[bytes_read] = '\0';
             if (strcmp(buffer, "SHUTDOWN") == 0) {
-                printf("\n<client-2> [Main Thread]: Received shutdown message: %s\n", buffer);
+                printf("\n----------------------------------------------------------------------\n");
+                printf("<client-2> [Main Thread ** %09lu]: Gracefully exiting...\n", main_thread_id);
+                
+                // Ensure cleanup before exiting
+                mq_close(shutdown_mq);
+                mq_unlink(client_response_queue_name);
+                mq_unlink(client_shutdown_queue_name);
+                
+                printf("<client-2> [Main Thread ** %09lu]: Resource cleanup complete...\n", main_thread_id);
+                printf("<client-2> [Main Thread ** %09lu]: Shutting down...\n", main_thread_id);
+                printf("----------------------------------------------------------------------\n");
+
                 exit(0);
-            } else {
-                printf("\n[Debug] Ignoring non-shutdown message: %s\n", buffer);
             }
+        } else if (errno != EAGAIN) {
+            perror("<client-2> Error receiving from shutdown queue");
         }
+        usleep(100000);  // Prevent busy waiting
     }
+
     mq_close(shutdown_mq);
     pthread_exit(NULL);
 }
+
+
 
 int main(){
     char command[MAX_MSG_SIZE];
@@ -67,6 +85,9 @@ int main(){
         perror("mq_open failed for client shutdown queue");
         exit(1);
     }
+
+
+
 
     // Start shutdown listener thread
     pthread_t thread_ID;

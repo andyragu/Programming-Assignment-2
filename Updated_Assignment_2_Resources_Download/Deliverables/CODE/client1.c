@@ -21,21 +21,38 @@ void* listen_for_shutdown(void* arg) {
     mqd_t shutdown_mq = *((mqd_t*) arg);
     free(arg);
     char buffer[MAX_MSG_SIZE];
+    unsigned long main_thread_id = pthread_self() % 1000000000;
+
     while (1) {
         ssize_t bytes_read = mq_receive(shutdown_mq, buffer, MAX_MSG_SIZE, NULL);
         if (bytes_read > 0) {
             buffer[bytes_read] = '\0';
             if (strcmp(buffer, "SHUTDOWN") == 0) {
-                printf("\n<client-1> [Main Thread]: Received shutdown message: %s\n", buffer);
+                printf("\n----------------------------------------------------------------------\n");
+                printf("<client-1> [Main Thread ** %09lu]: Gracefully exiting...\n", main_thread_id);
+                
+                // Ensure cleanup before exiting
+                mq_close(shutdown_mq);
+                mq_unlink(client_response_queue_name);
+                mq_unlink(client_shutdown_queue_name);
+                
+                printf("<client-1> [Main Thread ** %09lu]: Resource cleanup complete...\n", main_thread_id);
+                printf("<client-1> [Main Thread ** %09lu]: Shutting down...\n", main_thread_id);
+                printf("----------------------------------------------------------------------\n");
+
                 exit(0);
-            } else {
-                printf("\n[Debug] Ignoring non-shutdown message: %s\n", buffer);
             }
+        } else if (errno != EAGAIN) {
+            perror("<client-1> Error receiving from shutdown queue");
         }
+        usleep(100000);  // Prevent busy waiting
     }
+
     mq_close(shutdown_mq);
     pthread_exit(NULL);
 }
+
+
 
 int main() {
     char command[MAX_MSG_SIZE];
