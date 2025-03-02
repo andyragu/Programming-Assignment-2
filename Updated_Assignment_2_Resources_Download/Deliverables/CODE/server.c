@@ -250,10 +250,7 @@ void* handle_shell_command(void* arg) {
         pthread_exit(NULL);
     }
     
-    // Log before forking: show the actual shell command
-    printf("\n[Child Thread * %015lu]: Spawning a new child process to execute command '%s'\n",
-           pthread_self() % 1000000000000000, shell_cmd);
-    
+    // Remove pre-fork logging here.
     pid_t child_pid = fork();
     if (child_pid == -1) {
         perror("fork failed");
@@ -270,6 +267,10 @@ void* handle_shell_command(void* arg) {
         perror("execlp failed");
         exit(1);
     } else {
+        // Now that we have a valid child_pid, log the spawning message with its PID.
+        printf("\n[Child Thread * %015lu]: Spawning a new child process (PID: %d) to execute command '%s'\n",
+               pthread_self() % 1000000000000000, child_pid, shell_cmd);
+        
         close(pipefd[1]);
         int status;
         int waited = 0;
@@ -283,6 +284,9 @@ void* handle_shell_command(void* arg) {
             }
         }
         if (waited >= 30) {
+            // Add timeout log with the actual child PID.
+            printf("[Child Thread * %015lu]: Command execution timed out! Terminating the spawned child process (PID: %d)...\n",
+                   pthread_self() % 1000000000000000, child_pid);
             kill(child_pid, SIGKILL);
             waitpid(child_pid, &status, 0);
             char timeout_msg[] = "Command Timeout...";
@@ -307,7 +311,7 @@ void* handle_shell_command(void* arg) {
             output[n] = '\0';
             close(pipefd[0]);
             
-            // Log that the command was executed along with the child's PID
+            // Log that the command was executed along with the child's PID.
             printf("[Child Thread * %015lu]: Command '%s' executed by child process (PID: %d)\n",
                    pthread_self() % 1000000000000000, shell_cmd, child_pid);
             
@@ -332,6 +336,7 @@ void* handle_shell_command(void* arg) {
         }
     }
 }
+
 
 
 // Handler for client registration: "REGISTER <pid> <queue_name>"
