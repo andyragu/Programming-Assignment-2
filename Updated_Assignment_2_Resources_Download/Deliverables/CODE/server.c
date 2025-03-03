@@ -14,18 +14,18 @@
 #define MAX_MSG_SIZE 1024
 #define MAX_CLIENTS 10
 
-// Updated Client structure with a visible flag.
+// client struct with visibility flag
 typedef struct {
     int pid;
     char queue_name[50];
-    int visible;  // 1 = visible; 0 = hidden.
+    int visible;  // 1 = visible; 0 = hidden
 } Client;
 
 Client clients[MAX_CLIENTS];
 int client_count = 0;
 pthread_mutex_t lock;
 
-// Function to Print Server Header
+// prints server startup header info
 void print_header() {
     printf("\n============================================\n");
     printf("==== STUDENTS' REFERENCE SHELL SERVER ====\n");
@@ -37,7 +37,7 @@ void print_header() {
            pthread_self() % 1000000000);
 }
 
-// Function to Send Response to Client
+// sends response to client queue
 void send_response(const char* queue, const char* response) {
     mqd_t mq = mq_open(queue, O_WRONLY);
     if (mq != (mqd_t)-1) {
@@ -46,15 +46,14 @@ void send_response(const char* queue, const char* response) {
     }
 }
 
-// Handler for LIST command: "LIST <pid>"
-// This function builds the response and sends it.
+// handles LIST command from client
 void* handle_list(void* arg) {
     int client_pid = *((int*)arg);
     free(arg);
     char response[MAX_MSG_SIZE] = "Connected Clients:\n";
     char response_queue[50] = "";
     int found = 0;
-    int visible_clients = 0;  // Add a counter for visible clients
+    int visible_clients = 0;  // counter for visible clients
 
     pthread_mutex_lock(&lock);
     for (int i = 0; i < client_count; i++) {
@@ -63,14 +62,14 @@ void* handle_list(void* arg) {
             found = 1;
         }
         if (clients[i].visible) {
-            visible_clients++;  // Increment counter for each visible client
+            visible_clients++;
             char client_info[50];
             snprintf(client_info, sizeof(client_info), "Client %d --> (PID %d)\n", i + 1, clients[i].pid);
             strcat(response, client_info);
         }
     }
     
-    // If no visible clients were found, update the response
+    // update response if all clients are hidden
     if (visible_clients == 0 && client_count > 0) {
         strcpy(response, "Connected Clients:\nAll clients are hidden.\n");
     }
@@ -100,7 +99,7 @@ void* handle_list(void* arg) {
     pthread_exit(NULL);
 }
 
-// Handler for HIDE command: "HIDE <pid>"
+// handles HIDE command from client
 void* handle_hide(void* arg) {
     char command[MAX_MSG_SIZE];
     strcpy(command, (char*)arg);
@@ -133,7 +132,7 @@ void* handle_hide(void* arg) {
     pthread_exit(NULL);
 }
 
-// Handler for UNHIDE command: "UNHIDE <pid>"
+// handles UNHIDE command from client
 void* handle_unhide(void* arg) {
     char command[MAX_MSG_SIZE];
     strcpy(command, (char*)arg);
@@ -166,8 +165,7 @@ void* handle_unhide(void* arg) {
     pthread_exit(NULL);
 }
 
-// Handler for uppercase EXIT command: "EXIT <pid>"
-// Disconnects the client.
+// handles EXIT command - disconnects client
 void* handle_exit(void* arg) {
     char command[MAX_MSG_SIZE];
     strcpy(command, (char*)arg);
@@ -177,7 +175,7 @@ void* handle_exit(void* arg) {
         pthread_exit(NULL);
     }
     
-    // Print the cleanup message
+    // print cleanup message
     printf("\n[Child Thread * %015lu]: Cleaning up client (PID %d) resources...\n",
            pthread_self() % 1000000000000000, pid);
     
@@ -204,8 +202,7 @@ void* handle_exit(void* arg) {
     pthread_exit(NULL);
 }
 
-// Handler for lowercase exit command: "exit <pid>"
-// This command is ignored.
+// handles lowercase exit - ignores this command
 void* handle_lower_exit(void* arg) {
     char command[MAX_MSG_SIZE];
     strcpy(command, (char*)arg);
@@ -231,13 +228,12 @@ void* handle_lower_exit(void* arg) {
     pthread_exit(NULL);
 }
 
-// Handler for SHELL command: "SHELL <pid> <command string>"
-// Executes the shell command with a 3-second timeout.
+// handles shell commands with timeout
 void* handle_shell_command(void* arg) {
     char *msg = (char*) arg;
     int client_pid;
     char shell_cmd[MAX_MSG_SIZE];
-    // Extract the client PID and the command string
+    // extract pid and command
     if (sscanf(msg, "SHELL %d %[^\n]", &client_pid, shell_cmd) != 2) {
         free(msg);
         pthread_exit(NULL);
@@ -250,7 +246,6 @@ void* handle_shell_command(void* arg) {
         pthread_exit(NULL);
     }
     
-    // Remove pre-fork logging here.
     pid_t child_pid = fork();
     if (child_pid == -1) {
         perror("fork failed");
@@ -258,7 +253,7 @@ void* handle_shell_command(void* arg) {
         close(pipefd[1]);
         pthread_exit(NULL);
     }
-    if (child_pid == 0) {  // Child process
+    if (child_pid == 0) {  // child process
         close(pipefd[0]);
         dup2(pipefd[1], STDOUT_FILENO);
         dup2(pipefd[1], STDERR_FILENO);
@@ -267,14 +262,14 @@ void* handle_shell_command(void* arg) {
         perror("execlp failed");
         exit(1);
     } else {
-        // Now that we have a valid child_pid, log the spawning message with its PID.
+        // log spawning message
         printf("\n[Child Thread * %015lu]: Spawning a new child process (PID: %d) to execute command '%s'\n",
                pthread_self() % 1000000000000000, child_pid, shell_cmd);
         
         close(pipefd[1]);
         int status;
         int waited = 0;
-        while (waited < 30) {  // 30*100ms = 3 seconds
+        while (waited < 30) {  // 3 sec timeout (30*100ms)
             pid_t result = waitpid(child_pid, &status, WNOHANG);
             if (result == 0) {
                 usleep(100000);
@@ -284,7 +279,7 @@ void* handle_shell_command(void* arg) {
             }
         }
         if (waited >= 30) {
-            // Add timeout log with the actual child PID.
+            // handle timeout
             printf("[Child Thread * %015lu]: Command execution timed out! Terminating the spawned child process (PID: %d)...\n",
                    pthread_self() % 1000000000000000, child_pid);
             kill(child_pid, SIGKILL);
@@ -311,7 +306,7 @@ void* handle_shell_command(void* arg) {
             output[n] = '\0';
             close(pipefd[0]);
             
-            // Log that the command was executed along with the child's PID.
+            // log command execution
             printf("[Child Thread * %015lu]: Command '%s' executed by child process (PID: %d)\n",
                    pthread_self() % 1000000000000000, shell_cmd, child_pid);
             
@@ -339,7 +334,7 @@ void* handle_shell_command(void* arg) {
 
 
 
-// Handler for client registration: "REGISTER <pid> <queue_name>"
+// handles client registration
 void* handle_client(void* arg) {
     char command[MAX_MSG_SIZE];
     strcpy(command, (char*)arg);
@@ -356,7 +351,7 @@ void* handle_client(void* arg) {
         if (client_count < MAX_CLIENTS) {
             clients[client_count].pid = pid;
             strcpy(clients[client_count].queue_name, queue_name);
-            clients[client_count].visible = 1;  // Visible by default.
+            clients[client_count].visible = 1;  // visible by default
             client_count++;
         }
         pthread_mutex_unlock(&lock);
@@ -369,7 +364,7 @@ void* handle_client(void* arg) {
 }
 
 
-// Signal handler for cleanup and SHUTDOWN broadcast
+// signal handler for cleanup on exit
 void cleanup_server(int signum) {
     unsigned long main_thread_id = pthread_self() % 1000000000;
 
@@ -379,7 +374,7 @@ void cleanup_server(int signum) {
     printf("[Main Thread -- %09lu]: Cleaning up server and client resources...\n", main_thread_id);
     printf("[Main Thread -- %09lu]: Broadcasting 'SHUTDOWN' message to all the clients...\n", main_thread_id);
 
-    // Send SHUTDOWN message to all clients without extra logs
+    // send shutdown to all clients
     pthread_mutex_lock(&lock);
     for (int i = 0; i < client_count; i++) {
         char shutdown_queue[50];
@@ -393,14 +388,14 @@ void cleanup_server(int signum) {
     }
     pthread_mutex_unlock(&lock);
 
-    // Cleanup
+    // cleanup
     mq_unlink(SERVER_QUEUE);
     exit(0);
 }
 
 
 
-// Main server function
+// main server function
 int main() {
     mqd_t mq;
     struct mq_attr attr = {0, 10, MAX_MSG_SIZE, 0};
@@ -519,7 +514,7 @@ int main() {
         else if (strncmp(buffer, "SHELL ", 6) == 0) {
             int client_pid;
             char shell_cmd[MAX_MSG_SIZE];
-            // Parse the client PID and the shell command from the message.
+            // parse pid and shell command
             if (sscanf(buffer, "SHELL %d %[^\n]", &client_pid, shell_cmd) == 2) {
                 printf("\n[Main Thread -- %09lu]: Received command '%s' from the client (PID %d). About to create a child thread.\n",
                        pthread_self() % 1000000000, shell_cmd, client_pid);

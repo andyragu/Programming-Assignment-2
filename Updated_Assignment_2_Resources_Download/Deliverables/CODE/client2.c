@@ -14,10 +14,8 @@
 
 char client_response_queue_name[50];
 char client_shutdown_queue_name[50];
-mqd_t client_mq;  // Response queue descriptor
+mqd_t client_mq;  
 
-
-// Thread to listen for SHUTDOWN messages
 void* listen_for_shutdown(void* arg) {
     mqd_t shutdown_mq = *((mqd_t*) arg);
     free(arg);
@@ -32,7 +30,7 @@ void* listen_for_shutdown(void* arg) {
                 printf("\n----------------------------------------------------------------------\n");
                 printf("<client-2> [Main Thread ** %09lu]: Gracefully exiting...\n", main_thread_id);
                 
-                // Ensure cleanup before exiting
+                
                 mq_close(shutdown_mq);
                 mq_unlink(client_response_queue_name);
                 mq_unlink(client_shutdown_queue_name);
@@ -46,14 +44,12 @@ void* listen_for_shutdown(void* arg) {
         } else if (errno != EAGAIN) {
             perror("<client-2> Error receiving from shutdown queue");
         }
-        usleep(100000);  // Prevent busy waiting
+        usleep(100000);  
     }
 
     mq_close(shutdown_mq);
     pthread_exit(NULL);
 }
-
-
 
 int main(){
     char command[MAX_MSG_SIZE];
@@ -61,14 +57,13 @@ int main(){
     char final_command[MAX_MSG_SIZE];
     struct mq_attr attr = {0, 10, MAX_MSG_SIZE, 0};
 
-    // Open server queue
+    
     mqd_t server_mq = mq_open(SERVER_QUEUE, O_WRONLY);
     if (server_mq == (mqd_t)-1) {
         perror("mq_open failed for server queue");
         exit(1);
     }
 
-    // Create client response queue
     sprintf(client_response_queue_name, "%s%d", CLIENT_RESPONSE_QUEUE_PREFIX, getpid());
     mq_unlink(client_response_queue_name);
     client_mq = mq_open(client_response_queue_name, O_CREAT | O_RDONLY | O_NONBLOCK, 0666, &attr);
@@ -77,7 +72,7 @@ int main(){
         exit(1);
     }
 
-    // Create client shutdown queue
+   
     sprintf(client_shutdown_queue_name, "%s%d", CLIENT_SHUTDOWN_QUEUE_PREFIX, getpid());
     mq_unlink(client_shutdown_queue_name);
     mqd_t shutdown_mq = mq_open(client_shutdown_queue_name, O_CREAT | O_RDONLY, 0666, &attr);
@@ -86,17 +81,12 @@ int main(){
         exit(1);
     }
 
-
-
-
-    // Start shutdown listener thread
     pthread_t thread_ID;
     mqd_t* shutdown_mq_ptr = malloc(sizeof(mqd_t));
     if (!shutdown_mq_ptr) { perror("malloc failed"); exit(1); }
     *shutdown_mq_ptr = shutdown_mq;
     pthread_create(&thread_ID, NULL, listen_for_shutdown, shutdown_mq_ptr);
 
-    // Print startup messages only once
     unsigned long main_thread_id = pthread_self() % 1000000000;
     unsigned long child_thread_id = (unsigned long) thread_ID;
     printf("<client-2> [Main Thread -- %09lu]: I am the Client's Main Thread. My Parent Process is (PID: %d)...\n",
@@ -105,14 +95,12 @@ int main(){
            main_thread_id, child_thread_id);
     printf("<client-2> [Main Thread -- %09lu]: Client initialized. Enter commands (type 'EXIT' to quit)...\n", main_thread_id);
 
-    // Register with the server using the format: "REGISTER <pid> <queue_name>"
     {
         char register_command[MAX_MSG_SIZE];
         snprintf(register_command, MAX_MSG_SIZE, "REGISTER %d %s", getpid(), client_response_queue_name);
         mq_send(server_mq, register_command, strlen(register_command) + 1, 0);
     }
 
-    // Main input loop
     while (1) {
         printf("\n%sEnter Command: ", prompt);
         fflush(stdout);
@@ -124,7 +112,6 @@ int main(){
             continue;
         }
 
-        // Prepare final_command by appending PID for commands that the server expects
         if (strcmp(command, "LIST") == 0)
             snprintf(final_command, MAX_MSG_SIZE, "LIST %d", getpid());
         else if (strcmp(command, "HIDE") == 0)
@@ -140,13 +127,12 @@ int main(){
             snprintf(shell_body, MAX_MSG_SIZE - 20, "%s", command + 6);
             snprintf(final_command, MAX_MSG_SIZE, "SHELL %d %.*s", getpid(), MAX_MSG_SIZE - 20, shell_body);
         } else {
-            // For all other commands, assume it's a shell command and wrap it.
+            
             int prefix_len = snprintf(NULL, 0, "SHELL %d ", getpid());
             int max_cmd_len = MAX_MSG_SIZE - prefix_len;
             snprintf(final_command, MAX_MSG_SIZE, "SHELL %d %.*s", getpid(), max_cmd_len, command);
         }
-
-        // Handle CHPT command locally (without sending to server)
+    
         if (strncmp(final_command, "CHPT ", 5) == 0) {
             char new_prompt[MAX_MSG_SIZE];
             if (sscanf(final_command + 5, "%1022s", new_prompt) == 1) {
@@ -157,8 +143,7 @@ int main(){
             }
             continue;
         }
-
-        // For commands that require a server response (LIST, HIDE, UNHIDE, exit, SHELL, and EXIT)
+        
         if ((strncmp(final_command, "LIST", 4) == 0) ||
             (strncmp(final_command, "HIDE", 4) == 0) ||
             (strncmp(final_command, "UNHIDE", 6) == 0) ||
@@ -170,7 +155,7 @@ int main(){
             
             struct timespec timeout;
             clock_gettime(CLOCK_REALTIME, &timeout);
-            timeout.tv_sec += 2;  // Wait up to 2 seconds
+            timeout.tv_sec += 2;  
             ssize_t bytes_read;
             while ((bytes_read = mq_timedreceive(client_mq, response, MAX_MSG_SIZE, NULL, &timeout)) == -1 && errno == EAGAIN) {
                 usleep(50000);
@@ -183,16 +168,15 @@ int main(){
             } else {
                 perror("<client-2> Failed to receive response");
             }
-            // For uppercase EXIT, exit after receiving a response.
+            
             if (strncmp(final_command, "EXIT", 4) == 0)
                 break;
             continue;
         }
-        // For any other commands, send them without waiting for a reply.
+        
         mq_send(server_mq, final_command, strlen(final_command) + 1, 0);
     }
 
-    // Cleanup resources before exiting
     mq_close(server_mq);
     mq_close(client_mq);
     mq_unlink(client_response_queue_name);
